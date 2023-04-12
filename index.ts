@@ -30,7 +30,7 @@ type HTTPResponse = {
 
 type HTTPResponseBody = {
   type: string;
-  content: string | Uint8Array;
+  content: Uint8Array;
 };
 
 const INVALID_HTTP_METHOD = new Error('INVALID_HTTP_METHOD');
@@ -56,7 +56,7 @@ const MIME_TYPE = {
   xml: 'application/xml',
 } as const;
 
-const UNKNOWN_MIME_TYPE = 'application/octet-stream' as const;
+const UNKNOWN_MIME_TYPE = 'application/octet-stream';
 
 const CONN_BUFF_SIZE = 10240;
 
@@ -115,7 +115,7 @@ const handleError = async (conn: Deno.Conn, err: Error) => {
       httpVersion: 'HTTP/1.1',
       statusCode: 404,
       body: {
-        content: '404 NOT FOUND',
+        content: new TextEncoder().encode('404 NOT FOUND'),
         type: 'Text',
       },
     });
@@ -166,7 +166,7 @@ const parseRequest = (data: string): HTTPRequest => {
 };
 
 const sendFile = async (conn: Deno.Conn, filePath: string) => {
-  const file = await Deno.readTextFile(filePath);
+  const file = await Deno.readFile(filePath);
   const fileExt = filePath.split('.').pop();
   const fileMimeType =
     MIME_TYPE[fileExt as keyof typeof MIME_TYPE] || UNKNOWN_MIME_TYPE;
@@ -212,36 +212,37 @@ const makeResponse = ({
 
 const sendResponse = async (conn: Deno.Conn, response: HTTPResponse) => {
   const { httpVersion, statusCode, body, headers } = response;
-  let responseBuff = `${httpVersion} ${statusCode}\r\n`;
+
+  const firstLine = new TextEncoder().encode(
+    `${httpVersion} ${statusCode}\r\n`
+  );
+
+  await conn.write(firstLine);
+
   if (headers) {
     for (const headerKey of headers.keys()) {
-      responseBuff = appendHeader(
-        responseBuff,
-        headerKey,
-        headers.get(headerKey) ?? ''
-      );
+      await writeHeader(conn, headerKey, headers.get(headerKey) ?? '');
     }
   }
 
-  responseBuff = appendHeader(
-    responseBuff,
-    'Server',
-    'DENO-SIMPLE-HTTP-SERVER'
-  );
+  await writeHeader(conn, 'Server', 'DENO-SIMPLE-HTTP-SERVER');
 
-  responseBuff += '\r\n';
+  conn.write(new Uint8Array([13, 10])); // "\r\n"
 
-  if (body && body.content) {
-    responseBuff += body.content;
+  if (response.body) {
+    await writeAll(conn, response.body?.content);
   }
-
-  const aha = new TextEncoder().encode(responseBuff);
-  await Deno.writeFile('log.txt', aha);
-  await conn.write(new TextEncoder().encode(responseBuff).buffer);
 };
 
-const appendHeader = (response: string, key: string, value: string) => {
-  return (response += `${key}: ${value}\r\n`);
+const writeHeader = async (conn: Deno.Conn, key: string, value: string) => {
+  await conn.write(new TextEncoder().encode(`${key}: ${value}\r\n`));
+};
+
+const writeAll = async (conn: Deno.Conn, buff: Uint8Array) => {
+  let writtenBytes = 0;
+  while (writtenBytes < buff.length) {
+    writtenBytes += await conn.write(buff.slice(writtenBytes));
+  }
 };
 
 main();
