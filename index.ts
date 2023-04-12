@@ -88,7 +88,7 @@ const handleRequest = async (conn: Deno.Conn, request: HTTPRequest) => {
     const fileStat = await Deno.stat(filePath);
 
     if (fileStat.isDirectory) {
-      const indexHTMLFilePath = filePath + 'index.html';
+      const indexHTMLFilePath = filePath + '/index.html';
       await sendFile(conn, indexHTMLFilePath);
     }
 
