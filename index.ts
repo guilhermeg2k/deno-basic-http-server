@@ -1,17 +1,20 @@
-const HTTPMethods = ['GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS', 'PATCH'] as const;
-const HTTPVersions = ['HTTP/1.1', 'HTTP/2', 'HTTP/3'] as const;
+const HTTPMethods = [
+  'GET',
+  'POST',
+  'PUT',
+  'DELETE',
+  'HEAD',
+  'OPTIONS',
+  'PATCH',
+] as const;
 const HTTPStatusCode = [200, 400, 404, 500] as const;
 
 type HTTPMethod = typeof HTTPMethods[number];
-type HTTPVersion = typeof HTTPVersions[number];
+type HTTPVersion = 'HTTP/1.1';
 type HTTPStatusCode = typeof HTTPStatusCode[number];
-type HTTPResponseBody = {
-  type: string;
-  content: string;
-};
 
 type HTTPRequest = {
-  version: HTTPVersion;
+  httpVersion: HTTPVersion;
   method: HTTPMethod;
   path: string;
   headers?: Map<string, string>;
@@ -19,39 +22,110 @@ type HTTPRequest = {
 };
 
 type HTTPResponse = {
-  version: HTTPVersion;
+  httpVersion: HTTPVersion;
   statusCode: HTTPStatusCode;
   headers?: Map<string, string>;
   body?: HTTPResponseBody;
 };
 
+type HTTPResponseBody = {
+  type: string;
+  content: string | Uint8Array;
+};
+
+const INVALID_HTTP_METHOD = new Error('INVALID_HTTP_METHOD');
+const INVALID_HTTP_VERSION = new Error('INVALID_HTTP_VERSION');
+const NOT_FOUND = new Error('NOT_FOUND');
+const BAD_REQUEST_ERRORS = [INVALID_HTTP_METHOD, INVALID_HTTP_VERSION];
+
+const WWW_DIR = Deno.cwd() + '/www';
+
+const MIME_TYPE = {
+  html: 'text/html',
+  htm: 'text/html',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  css: 'text/css',
+  js: 'application/javascript',
+  json: 'application/json',
+  svg: 'image/svg+xml',
+  ico: 'image/x-icon',
+  txt: 'text/plain',
+  xml: 'application/xml',
+} as const;
+
+const UNKNOWN_MIME_TYPE = 'application/octet-stream' as const;
+
+const CONN_BUFF_SIZE = 10240;
+
 const main = async () => {
   const server = Deno.listen({ port: 8000 });
-
   for await (const conn of server) {
-    try {
-      const buff = new Uint8Array(1024);
-      const n = await conn.read(buff);
-      const data = new TextDecoder().decode(buff.subarray(0, n!));
-      const request = parseRequest(data);
-      console.log('🚀 Request:', request);
-
-      const response = makeResponse({
-        request,
-        headers: request.headers,
-        statusCode: 200,
-        body: {
-          content: `<div style="background-color: red"><h3>Hello world</h3> </div>`,
-          type: 'text/html; charset=utf-8',
-        },
-      });
-      writeResponse(conn, response);
-    } catch (err) {
-      conn.write(new TextEncoder().encode('HTTP/1.1 400 BAD REQUEST\r'));
-    } finally {
-      conn.close();
-    }
+    handleConnection(conn);
   }
+};
+
+const handleConnection = async (conn: Deno.Conn) => {
+  try {
+    const buff = new Uint8Array(CONN_BUFF_SIZE);
+    const connRawLength = await conn.read(buff);
+    if (!connRawLength) return;
+    const data = new TextDecoder().decode(buff.subarray(0, connRawLength));
+    const request = parseRequest(data);
+    await handleRequest(conn, request);
+  } catch (err) {
+    await handleError(conn, err);
+  } finally {
+    conn.close();
+  }
+};
+
+const handleRequest = async (conn: Deno.Conn, request: HTTPRequest) => {
+  try {
+    const filePath = WWW_DIR + request.path;
+    const fileStat = await Deno.stat(filePath);
+
+    if (fileStat.isDirectory) {
+      const indexHTMLFilePath = filePath + 'index.html';
+      await sendFile(conn, indexHTMLFilePath);
+    }
+
+    await sendFile(conn, filePath);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) {
+      throw NOT_FOUND;
+    }
+    throw error;
+  }
+};
+
+const handleError = async (conn: Deno.Conn, err: Error) => {
+  if (BAD_REQUEST_ERRORS.includes(err)) {
+    await sendResponse(conn, {
+      httpVersion: 'HTTP/1.1',
+      statusCode: 400,
+    });
+    return;
+  }
+
+  if (err == NOT_FOUND) {
+    await sendResponse(conn, {
+      httpVersion: 'HTTP/1.1',
+      statusCode: 404,
+      body: {
+        content: '404 NOT FOUND',
+        type: 'Text',
+      },
+    });
+    return;
+  }
+
+  await sendResponse(conn, {
+    httpVersion: 'HTTP/1.1',
+    statusCode: 500,
+  });
 };
 
 const parseRequest = (data: string): HTTPRequest => {
@@ -62,11 +136,11 @@ const parseRequest = (data: string): HTTPRequest => {
   let contentsLineIndex = 1;
 
   if (!HTTPMethods.includes(method as HTTPMethod)) {
-    throw new Error('INVALID_HTTP_METHOD');
+    throw INVALID_HTTP_METHOD;
   }
 
-  if (!HTTPVersions.includes(parsedVersion as HTTPVersion)) {
-    throw new Error('INVALID_HTTP_VERSION');
+  if (parsedVersion !== 'HTTP/1.1') {
+    throw INVALID_HTTP_VERSION;
   }
 
   const headers = new Map<string, string>();
@@ -83,21 +157,38 @@ const parseRequest = (data: string): HTTPRequest => {
   const request: HTTPRequest = {
     method: method as HTTPMethod,
     path,
-    version: parsedVersion as HTTPVersion,
+    httpVersion: parsedVersion as HTTPVersion,
     headers,
     body,
-  }
-  
+  };
+
   return request;
 };
 
+const sendFile = async (conn: Deno.Conn, filePath: string) => {
+  const file = await Deno.readTextFile(filePath);
+  const fileExt = filePath.split('.').pop();
+  const fileMimeType =
+    MIME_TYPE[fileExt as keyof typeof MIME_TYPE] || UNKNOWN_MIME_TYPE;
+
+  const response = makeResponse({
+    statusCode: 200,
+    httpVersion: 'HTTP/1.1',
+    body: {
+      content: file,
+      type: fileMimeType,
+    },
+  });
+
+  await sendResponse(conn, response);
+};
+
 const makeResponse = ({
-  request,
   statusCode,
   headers,
   body,
 }: {
-  request: HTTPRequest;
+  httpVersion: HTTPVersion;
   statusCode: HTTPStatusCode;
   headers?: Map<string, string>;
   body?: HTTPResponseBody;
@@ -111,7 +202,7 @@ const makeResponse = ({
 
   const response: HTTPResponse = {
     headers: responseHeaders,
-    version: request.version,
+    httpVersion: 'HTTP/1.1',
     statusCode,
     body: body,
   };
@@ -119,18 +210,34 @@ const makeResponse = ({
   return response;
 };
 
-const writeResponse = (conn: Deno.Conn, response: HTTPResponse) => {
-  const { version, statusCode, body, headers } = response;
-  let responseBuff = `${version} ${statusCode}\r\n`;
+const sendResponse = async (conn: Deno.Conn, response: HTTPResponse) => {
+  const { httpVersion, statusCode, body, headers } = response;
+  let responseBuff = `${httpVersion} ${statusCode}\r\n`;
   if (headers) {
     for (const headerKey of headers.keys()) {
-      console.log('🚀 ~ file: main.ts:124 ~ writeResponse ~ headerKey:', headerKey);
-      responseBuff = appendHeader(responseBuff, headerKey, headers.get(headerKey) ?? '');
+      responseBuff = appendHeader(
+        responseBuff,
+        headerKey,
+        headers.get(headerKey) ?? ''
+      );
     }
   }
 
-  responseBuff += '\r\n' + body?.content;
-  conn.write(new TextEncoder().encode(responseBuff));
+  responseBuff = appendHeader(
+    responseBuff,
+    'Server',
+    'DENO-SIMPLE-HTTP-SERVER'
+  );
+
+  responseBuff += '\r\n';
+
+  if (body && body.content) {
+    responseBuff += body.content;
+  }
+
+  const aha = new TextEncoder().encode(responseBuff);
+  await Deno.writeFile('log.txt', aha);
+  await conn.write(new TextEncoder().encode(responseBuff).buffer);
 };
 
 const appendHeader = (response: string, key: string, value: string) => {
