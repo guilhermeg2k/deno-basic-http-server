@@ -7,38 +7,16 @@ const HTTPMethods = [
   'OPTIONS',
   'PATCH',
 ] as const;
-const HTTPStatusCode = [200, 400, 404, 500] as const;
 
-type HTTPMethod = typeof HTTPMethods[number];
-type HTTPVersion = 'HTTP/1.1';
-type HTTPStatusCode = typeof HTTPStatusCode[number];
-
-type HTTPRequest = {
-  httpVersion: HTTPVersion;
-  method: HTTPMethod;
-  path: string;
-  headers?: Map<string, string>;
-  body?: string;
-};
-
-type HTTPResponse = {
-  httpVersion: HTTPVersion;
-  statusCode: HTTPStatusCode;
-  headers?: Map<string, string>;
-  body?: HTTPResponseBody;
-};
-
-type HTTPResponseBody = {
-  type: string;
-  content: Uint8Array;
-};
-
+const HTTPStatusCode = [200, 400, 404, 405, 500] as const;
 const INVALID_HTTP_METHOD = new Error('INVALID_HTTP_METHOD');
 const INVALID_HTTP_VERSION = new Error('INVALID_HTTP_VERSION');
+const METHOD_NOT_ALLOWED = new Error('METHOD_NOT_ALLOWED');
 const NOT_FOUND = new Error('NOT_FOUND');
 const BAD_REQUEST_ERRORS = [INVALID_HTTP_METHOD, INVALID_HTTP_VERSION];
-
-const WWW_DIR = Deno.cwd() + '/www';
+const HTTPVersion = 'HTTP/1.1';
+const CONN_BUFF_SIZE = 10240;
+const SERVER_DIR = Deno.args[0];
 
 const MIME_TYPE = {
   html: 'text/html',
@@ -58,10 +36,35 @@ const MIME_TYPE = {
 
 const UNKNOWN_MIME_TYPE = 'application/octet-stream';
 
-const CONN_BUFF_SIZE = 10240;
+type HTTPMethod = typeof HTTPMethods[number];
+
+type HTTPStatusCode = typeof HTTPStatusCode[number];
+
+type HTTPRequest = {
+  method: HTTPMethod;
+  path: string;
+  headers?: Map<string, string>;
+  body?: string;
+};
+
+type HTTPResponse = {
+  statusCode: HTTPStatusCode;
+  headers?: Map<string, string>;
+  body?: HTTPResponseBody;
+};
+
+type HTTPResponseBody = {
+  type: string;
+  content: Uint8Array;
+};
 
 const main = async () => {
+  if (!SERVER_DIR) {
+    console.log('Pass a folder to be served');
+    return;
+  }
   const server = Deno.listen({ port: 8000 });
+  console.log(`> Serving listening on port 8000`);
   for await (const conn of server) {
     handleConnection(conn);
   }
@@ -72,8 +75,11 @@ const handleConnection = async (conn: Deno.Conn) => {
     const buff = new Uint8Array(CONN_BUFF_SIZE);
     const connRawLength = await conn.read(buff);
     if (!connRawLength) return;
-    const data = new TextDecoder().decode(buff.subarray(0, connRawLength));
-    const request = parseRequest(data);
+
+    const dataDecoded = new TextDecoder().decode(
+      buff.subarray(0, connRawLength)
+    );
+    const request = parseRequest(dataDecoded);
     await handleRequest(conn, request);
   } catch (err) {
     await handleError(conn, err);
@@ -84,7 +90,10 @@ const handleConnection = async (conn: Deno.Conn) => {
 
 const handleRequest = async (conn: Deno.Conn, request: HTTPRequest) => {
   try {
-    const filePath = WWW_DIR + request.path;
+    if (request.method !== 'GET') {
+      throw METHOD_NOT_ALLOWED;
+    }
+    const filePath = SERVER_DIR + request.path;
     const fileStat = await Deno.stat(filePath);
 
     if (fileStat.isDirectory) {
@@ -104,15 +113,13 @@ const handleRequest = async (conn: Deno.Conn, request: HTTPRequest) => {
 const handleError = async (conn: Deno.Conn, err: Error) => {
   if (BAD_REQUEST_ERRORS.includes(err)) {
     await sendResponse(conn, {
-      httpVersion: 'HTTP/1.1',
       statusCode: 400,
     });
     return;
   }
 
-  if (err == NOT_FOUND) {
+  if (err === NOT_FOUND) {
     await sendResponse(conn, {
-      httpVersion: 'HTTP/1.1',
       statusCode: 404,
       body: {
         content: new TextEncoder().encode('404 NOT FOUND'),
@@ -122,8 +129,18 @@ const handleError = async (conn: Deno.Conn, err: Error) => {
     return;
   }
 
+  if (err === METHOD_NOT_ALLOWED) {
+    await sendResponse(conn, {
+      statusCode: 405,
+      body: {
+        content: new TextEncoder().encode('405 Method Not Allowed'),
+        type: 'Text',
+      },
+    });
+    return;
+  }
+
   await sendResponse(conn, {
-    httpVersion: 'HTTP/1.1',
     statusCode: 500,
   });
 };
@@ -157,7 +174,6 @@ const parseRequest = (data: string): HTTPRequest => {
   const request: HTTPRequest = {
     method: method as HTTPMethod,
     path,
-    httpVersion: parsedVersion as HTTPVersion,
     headers,
     body,
   };
@@ -173,7 +189,6 @@ const sendFile = async (conn: Deno.Conn, filePath: string) => {
 
   const response = makeResponse({
     statusCode: 200,
-    httpVersion: 'HTTP/1.1',
     body: {
       content: file,
       type: fileMimeType,
@@ -188,7 +203,6 @@ const makeResponse = ({
   headers,
   body,
 }: {
-  httpVersion: HTTPVersion;
   statusCode: HTTPStatusCode;
   headers?: Map<string, string>;
   body?: HTTPResponseBody;
@@ -202,7 +216,6 @@ const makeResponse = ({
 
   const response: HTTPResponse = {
     headers: responseHeaders,
-    httpVersion: 'HTTP/1.1',
     statusCode,
     body: body,
   };
@@ -211,10 +224,10 @@ const makeResponse = ({
 };
 
 const sendResponse = async (conn: Deno.Conn, response: HTTPResponse) => {
-  const { httpVersion, statusCode, body, headers } = response;
+  const { statusCode, body, headers } = response;
 
   const firstLine = new TextEncoder().encode(
-    `${httpVersion} ${statusCode}\r\n`
+    `${HTTPVersion} ${statusCode}\r\n`
   );
 
   await conn.write(firstLine);
@@ -229,8 +242,8 @@ const sendResponse = async (conn: Deno.Conn, response: HTTPResponse) => {
 
   conn.write(new Uint8Array([13, 10])); // "\r\n"
 
-  if (response.body) {
-    await writeAll(conn, response.body?.content);
+  if (body) {
+    await writeBody(conn, body?.content);
   }
 };
 
@@ -238,7 +251,7 @@ const writeHeader = async (conn: Deno.Conn, key: string, value: string) => {
   await conn.write(new TextEncoder().encode(`${key}: ${value}\r\n`));
 };
 
-const writeAll = async (conn: Deno.Conn, buff: Uint8Array) => {
+const writeBody = async (conn: Deno.Conn, buff: Uint8Array) => {
   let writtenBytes = 0;
   while (writtenBytes < buff.length) {
     writtenBytes += await conn.write(buff.slice(writtenBytes));
