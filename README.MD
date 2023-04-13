@@ -4,11 +4,15 @@
 
 # Deno Simple HTTP Server
 
-This is a simple not full implementation of HTTP server in Deno, that was created for educational to obtain knowledge about the HTTP protocol and Deno.
+This is a partial implementation of a HTTP Server from scratch in Deno, created for educational purposes to gain a better understanding of the HTTP protocol and have a taste of Deno.
 
 ## Features
 
 - Server a folder with static files
+
+## Binaries
+
+- [Releases](https://github.com/guilhermeg2k/deno-basic-http-server/releases/)
 
 ## Dependencies
 
