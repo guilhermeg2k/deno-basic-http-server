@@ -1,6 +1,6 @@
 {
   "tasks": {
-    "run": "deno run --watch --allow-net --allow-read --allow-write main.ts",
-    "build": "deno compile --allow-net --allow-read --allow-write --output deno-http-server main.ts"
+    "run": "deno run --watch --allow-net --allow-read --allow-write src/main.ts",
+    "build": "deno compile --allow-net --allow-read --allow-write --output build/deno-http-server src/main.ts"
   }
 }
